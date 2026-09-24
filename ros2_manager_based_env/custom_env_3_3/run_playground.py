@@ -43,6 +43,7 @@ def main() -> None:
                 "wrist_cam",
                 "table_cam",
             ],
+            env=env,
             state_topic="/vla/obs/state",
             action_topic="/vla/action",
             camera_topic_prefix="/vla/obs/",
@@ -58,6 +59,11 @@ def main() -> None:
         )
 
         while simulation_app.is_running():
+            if bridge.is_paused:
+                import time
+                time.sleep(0.01)
+                continue
+
             # One row [1, 7] from current VLA action chunk.
             action = bridge.get_action().to(env.device)
 

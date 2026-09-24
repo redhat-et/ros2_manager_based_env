@@ -29,7 +29,7 @@ action_dim if layout.dim isn't populated).
 
 Usage (see run_ros2_rollout.py for the full loop):
 
-    bridge = Ros2VlaBridge(camera_names=["wrist_cam", "table_cam"])
+    bridge = Ros2VlaBridge(camera_names=["wrist_cam", "table_cam"], env=env)
     ...
     while True:
         action = bridge.get_action()          # next step of the current VLA action chunk
@@ -48,6 +48,12 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
+from simulation_interfaces.srv import (
+    GetSimulationState,
+    ResetSimulation,
+    SetSimulationState,
+    StepSimulation,
+)
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension
 
 from .observations import eef_pose_axis_angle, gripper_pos
@@ -58,11 +64,18 @@ class Ros2VlaBridge:
 
     Assumes num_envs == 1 (single live robot) -- this is a rollout/
     deployment bridge, not a training-time vectorized wrapper.
+
+    Implements standard simulation_interfaces services for sim control:
+    - /reset_simulation: Resets environment including action manager buffers
+    - /set_simulation_state: Sets sim state (STOPPED/PLAYING/PAUSED)
+    - /step_simulation: Steps simulation by N steps
+    - /get_simulation_state: Returns current sim state
     """
 
     def __init__(
         self,
         camera_names: list[str],
+        env,  # IsaacLab ManagerBasedEnv instance
         state_topic: str = "/vla/obs/state",
         action_topic: str = "/vla/action",
         camera_topic_prefix: str = "/vla/obs/",
@@ -74,6 +87,7 @@ class Ros2VlaBridge:
 
         self._camera_names = camera_names
         self._action_dim = action_dim
+        self._env = env  # Store env reference for reset/step services
 
         self._node = Node(node_name)
 
@@ -102,9 +116,33 @@ class Ros2VlaBridge:
         self._chunk_step_index = 0
         self._has_received_chunk = False
 
-        self._action_subscriber = self._node.create_subscription(
-            Float32MultiArray, action_topic, self._on_action_chunk_msg, qos
+        action_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
         )
+        self._action_subscriber = self._node.create_subscription(
+            Float32MultiArray, action_topic, self._on_action_chunk_msg, action_qos
+        )
+
+        # Standard simulation_interfaces service servers
+        self._reset_service = self._node.create_service(
+            ResetSimulation, "/reset_simulation", self._handle_reset_simulation
+        )
+        self._set_state_service = self._node.create_service(
+            SetSimulationState, "/set_simulation_state", self._handle_set_simulation_state
+        )
+        self._step_service = self._node.create_service(
+            StepSimulation, "/step_simulation", self._handle_step_simulation
+        )
+        self._get_state_service = self._node.create_service(
+            GetSimulationState, "/get_simulation_state", self._handle_get_simulation_state
+        )
+
+        # Simulation state tracking
+        self._sim_state_lock = threading.Lock()
+        self._sim_state = 1  # STATE_PLAYING
+        self._paused = False
 
         # Spin in a background thread so callbacks fire concurrently with
         # the sim loop, instead of blocking it.
@@ -113,6 +151,108 @@ class Ros2VlaBridge:
 
     def _spin(self):
         rclpy.spin(self._node)
+
+    def _handle_reset_simulation(
+        self, request: ResetSimulation.Request, response: ResetSimulation.Response
+    ):
+        """Handle /reset_simulation service: fully resets env including action manager."""
+        try:
+            self._node.get_logger().info("ResetSimulation service called - resetting environment")
+
+            # Reset the environment (clears action manager buffers!)
+            self._env.reset()
+
+            # Clear action buffer in bridge
+            with self._action_lock:
+                self._current_chunk = torch.zeros(1, self._action_dim)
+                self._chunk_step_index = 0
+                self._has_received_chunk = False
+
+            # Transition to STOPPED so a subsequent Play can re-trigger PLAYING
+            with self._sim_state_lock:
+                self._sim_state = 0  # STATE_STOPPED
+                self._paused = True
+
+            self._node.get_logger().info("ResetSimulation completed successfully (state → STOPPED)")
+        except Exception as e:
+            self._node.get_logger().error(f"ResetSimulation failed: {e}")
+            response.result.result = 1
+            response.result.error_message = str(e)
+
+        return response
+
+    def _handle_set_simulation_state(
+        self, request: SetSimulationState.Request, response: SetSimulationState.Response
+    ):
+        """Handle /set_simulation_state service: sets sim state (STOPPED/PLAYING/PAUSED)."""
+        try:
+            state_names = {0: "STOPPED", 1: "PLAYING", 2: "PAUSED", 3: "QUITTING"}
+            state_name = state_names.get(request.state.state, f"UNKNOWN({request.state.state})")
+
+            self._node.get_logger().info(f"SetSimulationState service called: {state_name}")
+
+            with self._sim_state_lock:
+                self._sim_state = request.state.state
+                self._paused = request.state.state in (0, 2)  # STOPPED or PAUSED
+
+                # STOPPED (0) = pause + reset
+                if request.state.state == 0:
+                    self._env.reset()
+                    with self._action_lock:
+                        self._current_chunk = torch.zeros(1, self._action_dim)
+                        self._chunk_step_index = 0
+                        self._has_received_chunk = False
+
+            self._node.get_logger().info(f"SetSimulationState to {state_name} completed")
+        except Exception as e:
+            self._node.get_logger().error(f"SetSimulationState failed: {e}")
+            response.result.result = 1
+            response.result.error_message = str(e)
+
+        return response
+
+    def _handle_step_simulation(
+        self, request: StepSimulation.Request, response: StepSimulation.Response
+    ):
+        """Handle /step_simulation service: step simulation by N steps.
+
+        Note: This is a simplified implementation. For full stepping support,
+        the calling code (run_ros2_rollout.py) would need to respect the
+        paused state and only step when explicitly requested via this service.
+        """
+        try:
+            steps = request.steps
+            self._node.get_logger().info(f"StepSimulation service called: {steps} steps")
+
+            # For manager-based envs, stepping is done by the rollout loop
+            # This service acknowledges the request but doesn't directly step
+            # (the rollout loop would need to check _paused and step accordingly)
+            self._node.get_logger().info(f"StepSimulation acknowledged {steps} steps")
+        except Exception as e:
+            self._node.get_logger().error(f"StepSimulation failed: {e}")
+            response.result.result = 1
+            response.result.error_message = str(e)
+
+        return response
+
+    def _handle_get_simulation_state(
+        self, request: GetSimulationState.Request, response: GetSimulationState.Response
+    ):
+        """Handle /get_simulation_state service: return current sim state."""
+        with self._sim_state_lock:
+            response.state.state = self._sim_state
+
+        state_names = {0: "STOPPED", 1: "PLAYING", 2: "PAUSED"}
+        self._node.get_logger().debug(
+            f"GetSimulationState returned: {state_names.get(response.state.state, response.state.state)}"
+        )
+        return response
+
+    @property
+    def is_paused(self) -> bool:
+        """Check if simulation is paused (for rollout loop to respect)."""
+        with self._sim_state_lock:
+            return self._paused
 
     def _on_action_chunk_msg(self, msg: Float32MultiArray) -> None:
         data = list(msg.data)

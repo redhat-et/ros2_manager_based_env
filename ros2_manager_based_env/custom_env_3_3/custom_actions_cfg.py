@@ -33,9 +33,9 @@ class ActionsCfg:
             motion_stiffness_task=100.0,
             motion_damping_ratio_task=1.0,
             motion_stiffness_limits_task=(50.0, 200.0),
-            nullspace_control="none", # was "center",
+            nullspace_control="position", # was "position"
         ),
-        nullspace_joint_pos_target="none", # was "center",
+        nullspace_joint_pos_target="center", # was "center"
         position_scale=1.0,
         orientation_scale=1.0,
     )

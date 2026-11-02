@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .contract import POSITION_SCALE, ORIENTATION_SCALE, FINGER_OPEN, FINGER_CLOSED
 from isaaclab.utils import configclass
 from isaaclab.controllers.operational_space_cfg import OperationalSpaceControllerCfg
 from isaaclab.envs.mdp.actions.actions_cfg import (
@@ -36,13 +37,13 @@ class ActionsCfg:
             nullspace_control="position", # was "position"
         ),
         nullspace_joint_pos_target="center", # was "center"
-        position_scale=1.0,
-        orientation_scale=1.0,
+        position_scale=POSITION_SCALE,
+        orientation_scale=ORIENTATION_SCALE,
     )
 
     gripper_action = BinaryJointPositionActionCfg(
         asset_name="robot",
         joint_names=["panda_finger.*"],
-        open_command_expr={"panda_finger_.*": 0.04},
-        close_command_expr={"panda_finger_.*": 0.0},
+        open_command_expr={"panda_finger_.*": FINGER_OPEN},
+        close_command_expr={"panda_finger_.*": FINGER_CLOSED},
     )

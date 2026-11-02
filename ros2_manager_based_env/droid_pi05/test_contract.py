@@ -1,19 +1,19 @@
 """Pure-Python contract tests: python -m unittest <package>.test_contract."""
 import unittest
 import numpy as np
-from .contract import (ChunkBuffer, decode_chunk, joint_targets, closure_from_fingers,
+from .contract import (decode_chunk, joint_targets, closure_from_fingers,
                        CONTROL_HZ, PHYSICS_HZ, DECIMATION)
-
+from ..bridge import ActionChunkBuffer
 
 class ContractTests(unittest.TestCase):
     def test_rates(self):
         self.assertEqual(PHYSICS_HZ / DECIMATION, CONTROL_HZ)
 
     def test_no_chunk_is_idle(self):
-        self.assertIsNone(ChunkBuffer().pop())
+        self.assertIsNone(ActionChunkBuffer().pop())
 
     def test_once_per_tick_then_idle(self):
-        b = ChunkBuffer()
+        b = ActionChunkBuffer()
         a = np.arange(15 * 8, dtype=np.float32).reshape(15, 8)
         b.replace(a)
         for row in a:
@@ -23,13 +23,13 @@ class ContractTests(unittest.TestCase):
         self.assertIsNone(b.pop())
 
     def test_empty_cancels_motion(self):
-        b = ChunkBuffer()
+        b = ActionChunkBuffer()
         b.replace(np.ones((15, 8)))
         b.replace(decode_chunk([]))
         self.assertIsNone(b.pop())
 
     def test_new_chunk_replaces_remainder(self):
-        b = ChunkBuffer()
+        b = ActionChunkBuffer()
         b.replace(np.ones((15, 8)))
         b.pop()
         b.replace(np.zeros((1, 8)))
@@ -45,7 +45,7 @@ class ContractTests(unittest.TestCase):
                     decode_chunk(data, shape, offset)
 
     def test_source_not_mutated(self):
-        b = ChunkBuffer()
+        b = ActionChunkBuffer()
         a = np.ones((1, 8))
         b.replace(a)
         a[:] = 0

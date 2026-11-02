@@ -95,6 +95,7 @@ def main() -> None:
 
         print("[INFO] Creating DROID ROS2 bridge...", flush=True)
         bridge = DroidBridge(args_cli.ros_prefix)
+        bridge.set_decimation(env.cfg.decimation)
         env.reset()
 
         # Like custom_env_3_3, step twice before publishing camera data.
@@ -112,24 +113,34 @@ def main() -> None:
         print(f"DROID READY: physics={PHYSICS_HZ}Hz control={CONTROL_HZ}Hz "
               f"model_chunk={MODEL_HORIZON}x8 prefix={bridge.prefix}", flush=True)
 
+        def reset_environment():
+            nonlocal obs, sim_time, idle
+            obs, _ = env.reset()
+            sim_time = 0.0
+            idle = True
+
+        def step_environment():
+            nonlocal obs, sim_time, idle
+            row, idle = bridge.action()
+            with torch.inference_mode():
+                obs, _, terminated, truncated, _ = env.step(
+                    torch.as_tensor(row, device=env.device).unsqueeze(0))
+            sim_time += 1.0 / CONTROL_HZ
+            if bool(terminated.any() or truncated.any()):
+                bridge.clear_action_buffer()
+                reset_environment()
+
         while simulation_app.is_running():
             start = time.monotonic()
-            reset, do_step = bridge.controls()
-            if reset:
-                obs, _ = env.reset()
-                idle = True
-            if do_step:
-                row, idle = bridge.action()
-                with torch.inference_mode():
-                    obs, _, terminated, truncated, _ = env.step(
-                        torch.as_tensor(row, device=env.device).unsqueeze(0))
-                sim_time += 1.0 / CONTROL_HZ
-                if bool(terminated.any() or truncated.any()):
-                    obs, _ = env.reset()
+            handled = bridge.process_control_commands(
+                reset_environment, step_environment, env.cfg.decimation)
+            running = not bridge.is_paused
+            if running and not handled:
+                step_environment()
             else:
                 env.sim.render()
             bridge.publish(obs["policy"], env, sim_time, idle)
-            if not args_cli.fast or not do_step:
+            if not args_cli.fast or not running:
                 time.sleep(max(0.0, 1.0 / CONTROL_HZ - (time.monotonic() - start)))
     except KeyboardInterrupt:
         pass

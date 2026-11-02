@@ -8,7 +8,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab_assets.robots.franka import FRANKA_PANDA_CFG
 
-from .contract import CONTROL_HZ
+from .contract import CAMERA_UPDATE_PERIOD
 
 
 def panda():
@@ -31,7 +31,7 @@ def panda():
 
 def camera(path, pos, rot):
     return CameraCfg(
-        prim_path=path, update_period=1.0 / CONTROL_HZ,
+        prim_path=path, update_period=CAMERA_UPDATE_PERIOD,
         height=224, width=224, data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=18.0, horizontal_aperture=36.0, vertical_aperture=36.0,

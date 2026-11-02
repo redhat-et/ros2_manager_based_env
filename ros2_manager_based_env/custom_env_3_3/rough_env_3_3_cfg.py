@@ -6,6 +6,7 @@ from isaaclab_assets.robots.franka import FRANKA_PANDA_CFG
 from isaaclab.sensors import CameraCfg
 import isaaclab.sim as sim_utils
 
+from .contract import FINGER_NAMES, CAMERA_UPDATE_PERIOD, CAMERA_HEIGHT, CAMERA_WIDTH
 from .custom_velocity_env_cfg import CustomLocomotionVelocityRoughEnvCfg
 
 
@@ -14,10 +15,7 @@ class G1RoughEnv3_3Cfg(CustomLocomotionVelocityRoughEnvCfg):
     """Franka Panda manipulation env for ROS2-driven VLA rollout."""
 
     # Used by observations.gripper_pos().
-    gripper_joint_names = (
-        "panda_finger_joint1",
-        "panda_finger_joint2",
-    )
+    gripper_joint_names = FINGER_NAMES
 
     def __post_init__(self):
         super().__post_init__()
@@ -30,7 +28,7 @@ class G1RoughEnv3_3Cfg(CustomLocomotionVelocityRoughEnvCfg):
         robot_cfg.actuators["panda_shoulder"].damping = 0.0
         robot_cfg.actuators["panda_forearm"].stiffness = 0.0
         robot_cfg.actuators["panda_forearm"].damping = 0.0
-        
+
         robot_cfg.init_state.joint_pos = {
             "panda_joint1": 0.0,
             "panda_joint2": 0.0,
@@ -43,15 +41,15 @@ class G1RoughEnv3_3Cfg(CustomLocomotionVelocityRoughEnvCfg):
         }
 
         self.scene.robot = robot_cfg
-        
-        
+
+
         # Set cameras
         # Set wrist camera
         self.scene.wrist_cam = CameraCfg(
             prim_path="{ENV_REGEX_NS}/Robot/panda_hand/wrist_cam",
-            update_period=0.15,
-            height=256,
-            width=256,
+            update_period=CAMERA_UPDATE_PERIOD,
+            height=CAMERA_HEIGHT,
+            width=CAMERA_WIDTH,
             data_types=["rgb"],
             spawn=sim_utils.PinholeCameraCfg(
                 focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 2)
@@ -64,9 +62,9 @@ class G1RoughEnv3_3Cfg(CustomLocomotionVelocityRoughEnvCfg):
         # Set table view camera
         self.scene.table_cam = CameraCfg(
             prim_path="{ENV_REGEX_NS}/table_cam",
-            update_period=0.15,
-            height=256,
-            width=256,
+            update_period=CAMERA_UPDATE_PERIOD,
+            height=CAMERA_HEIGHT,
+            width=CAMERA_WIDTH,
             data_types=["rgb"],
             #colorize_semantic_segmentation=True,
             #semantic_segmentation_mapping=SEMANTIC_MAPPING,
@@ -76,9 +74,9 @@ class G1RoughEnv3_3Cfg(CustomLocomotionVelocityRoughEnvCfg):
             offset=CameraCfg.OffsetCfg(
                 pos=(1.5, 0.0, 0.4), rot=(0.55721, 0.43534, 0.43534, 0.55721), convention="opengl"
             ),
-        )        
-        
-        
+        )
+
+
 
 @configclass
 class G1RoughEnv3_3Cfg_ROS2(G1RoughEnv3_3Cfg):

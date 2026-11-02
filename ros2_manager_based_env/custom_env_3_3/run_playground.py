@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 
 
 def main() -> None:
@@ -26,6 +27,7 @@ def main() -> None:
 
     from .playground_env_cfg import G1RoughEnv3_3PlaygroundCfg
     from .ros2_bridge import Ros2VlaBridge
+    from .contract import ACTION_DIM
 
     env = None
     bridge = None
@@ -34,20 +36,14 @@ def main() -> None:
         print("[INFO] Creating Manager-Based Playground environment...", flush=True)
 
         env_cfg = G1RoughEnv3_3PlaygroundCfg()
+        env_cfg.sim.device = args_cli.device
         env = ManagerBasedRLEnv(cfg=env_cfg)
 
         print("[INFO] Creating ROS2 VLA bridge...", flush=True)
 
         bridge = Ros2VlaBridge(
-            camera_names=[
-                "wrist_cam",
-                "table_cam",
-            ],
             env=env,
-            state_topic="/vla/obs/state",
-            action_topic="/vla/action",
-            camera_topic_prefix="/vla/obs/",
-            action_dim=7,
+            action_dim=ACTION_DIM,
         )
 
         env.reset()
@@ -58,22 +54,25 @@ def main() -> None:
             flush=True,
         )
 
-        while simulation_app.is_running():
-            if bridge.is_paused:
-                import time
-                time.sleep(0.01)
-                continue
+        def reset_environment():
+            env.reset()
 
-            # One row [1, 7] from current VLA action chunk.
+        def step_environment():
             action = bridge.get_action().to(env.device)
-
             _, _, terminated, truncated, _ = env.step(action)
-
-            # Ros2VlaBridge reads cameras/state directly from env.scene.
-            bridge.publish_observations(env)
-
             if bool(terminated.any() or truncated.any()):
+                bridge.clear_action_buffer()
                 env.reset()
+
+        while simulation_app.is_running():
+            handled = bridge.process_control_commands(
+                reset_environment, step_environment, env.cfg.decimation)
+            if not bridge.is_paused and not handled:
+                step_environment()
+            else:
+                env.sim.render()
+                time.sleep(0.01)
+            bridge.publish_observations(env)
 
     except KeyboardInterrupt:
         pass

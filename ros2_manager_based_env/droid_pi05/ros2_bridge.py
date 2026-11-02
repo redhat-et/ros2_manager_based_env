@@ -1,32 +1,32 @@
+
+    
+  
 """ROS transport only. Isaac API calls stay on the simulator main thread."""
 from __future__ import annotations
 
 import json
-import threading
 import numpy as np
-import rclpy
-from rclpy.executors import SingleThreadedExecutor
-from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, CameraInfo
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension, String
 from std_srvs.srv import Trigger
 
-from .contract import ChunkBuffer, decode_chunk, CAMERA_KEYS, CONTROL_HZ
+from ..bridge import BaseRos2Bridge, ActionChunkBuffer
+
+from .contract import (
+    decode_chunk,
+    CAMERA_KEYS,
+    CONTROL_HZ,
+    ACTION_DIM,
+    MODEL_HORIZON,
+)
 
 
-class DroidBridge:
+class DroidBridge(BaseRos2Bridge):
     def __init__(self, prefix="/droid"):
         self.prefix = prefix.rstrip("/")
-        self._owns_context = not rclpy.ok()
-        if self._owns_context:
-            rclpy.init()
-        self.node = Node("isaaclab_droid_pi05")
-        self.buffer = ChunkBuffer()
-        self._lock = threading.Lock()
-        self._paused = False
-        self._reset = False
-        self._step = False
+        super().__init__("isaaclab_droid_pi05")
+        self.buffer = ActionChunkBuffer(ACTION_DIM, max_horizon=MODEL_HORIZON,)
         self._received_chunks = 0
         self.images = {k: self.node.create_publisher(Image, f"{self.prefix}/obs/{k}", qos_profile_sensor_data)
                        for k in CAMERA_KEYS}
@@ -35,49 +35,46 @@ class DroidBridge:
         self.state = self.node.create_publisher(Float32MultiArray, f"{self.prefix}/obs/state", qos_profile_sensor_data)
         self.status = self.node.create_publisher(String, f"{self.prefix}/status", 1)
         self.node.create_subscription(Float32MultiArray, f"{self.prefix}/action_chunk", self._on_chunk, 1)
-        self._services = [self.node.create_service(Trigger, f"{self.prefix}/{name}", self._service(name))
-                          for name in ("pause", "resume", "reset", "step", "stop")]
-        self.executor = SingleThreadedExecutor()
-        self.executor.add_node(self.node)
-        self.thread = threading.Thread(target=self.executor.spin, daemon=True)
-        self.thread.start()
+        self._trigger_services = [
+            self.node.create_service(
+                Trigger, f"{self.prefix}/{name}", self._trigger(name),
+                callback_group=self._control_group,
+            )
+            for name in ("pause", "resume", "reset", "step", "stop")
+        ]
+        self._decimation = 1
+        self.start()
 
-    def _service(self, name):
-        def callback(request, response):
-            with self._lock:
-                if name in ("pause", "stop", "reset"):
-                    self._paused = True
-                    self._step = False
-                    self.buffer.clear()
-                if name == "reset":
-                    self._reset = True
-                if name == "resume":
-                    self.buffer.clear()
-                    self._paused = False
-                if name == "step":
-                    self._step = True
-                    self._paused = True
-                response.success = True
-                response.message = f"{name} queued for the simulator main thread"
+    def set_decimation(self, decimation):
+        self._decimation = int(decimation)
+
+    def _trigger(self, name):
+        async def callback(request, response):
+            if name == "reset":
+                error = await self._submit("reset")
+            elif name == "step":
+                error = await self._submit("step", self._decimation)
+            else:
+                target = {"pause": self.PAUSED, "resume": self.PLAYING,
+                          "stop": self.STOPPED}[name]
+                error = await self._submit("state", target)
+            response.success = error is None
+            response.message = error or f"{name} completed"
             return response
         return callback
+
+    def clear_action_buffer(self):
+        self.buffer.clear()
 
     def _on_chunk(self, msg):
         try:
             chunk = decode_chunk(msg.data, tuple(d.size for d in msg.layout.dim), msg.layout.data_offset)
             with self._lock:
-                if not self._paused:
-                    self.buffer.replace(chunk)
-                    self._received_chunks += 1
+                self.buffer.replace(chunk)
+                self._received_chunks += 1
         except (ValueError, TypeError) as exc:
             self.buffer.clear()
             self.node.get_logger().error(f"Rejected chunk and cleared buffer: {exc}")
-
-    def controls(self):
-        with self._lock:
-            reset, do_step = self._reset, (not self._paused or self._step)
-            self._reset = self._step = False
-            return reset, do_step
 
     def action(self):
         row = self.buffer.pop()
@@ -119,7 +116,7 @@ class DroidBridge:
             info.p = np.column_stack([k, np.zeros(3)]).reshape(-1).astype(float).tolist()
             self.infos[name].publish(info)
         with self._lock:
-            paused = self._paused
+            paused = self.is_paused
             received_chunks = self._received_chunks
         status = String()
         status.data = json.dumps({"sim_time": round(sim_time, 6), "control_hz": CONTROL_HZ,
@@ -127,9 +124,5 @@ class DroidBridge:
                                   "received_chunks": received_chunks})
         self.status.publish(status)
 
-    def close(self):
-        self.executor.shutdown(timeout_sec=2.0)
-        self.thread.join(timeout=2.0)
-        self.node.destroy_node()
-        if self._owns_context and rclpy.ok():
-            rclpy.shutdown()
+
+

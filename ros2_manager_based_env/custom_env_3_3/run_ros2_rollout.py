@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 
 
 WRIST_CAMERA_PRIM_PATH = "/World/envs/env_0/Robot/panda_hand/wrist_cam"
@@ -38,6 +39,7 @@ def main() -> None:
 
     from .rough_env_3_3_cfg import G1RoughEnv3_3Cfg_ROS2
     from .ros2_bridge import Ros2VlaBridge
+    from .contract import ACTION_DIM
 
     def quat_for_xform_op(
         op: UsdGeom.XformOp,
@@ -97,38 +99,48 @@ def main() -> None:
     bridge = None
     try:
         env_cfg = G1RoughEnv3_3Cfg_ROS2()
+        env_cfg.sim.device = args_cli.device
         env = ManagerBasedRLEnv(cfg=env_cfg)
 
         bridge = Ros2VlaBridge(
-            camera_names=["wrist_cam", "table_cam"],
             env=env,
-            state_topic="/vla/obs/state",
-            action_topic="/vla/action",
-            camera_topic_prefix="/vla/obs/",
-            action_dim=7,
+            action_dim=ACTION_DIM,
         )
 
         env.reset()
 
-        warmup_action = torch.zeros(env.num_envs, 7, device=env.device)
+        warmup_action = torch.zeros(env.num_envs, ACTION_DIM, device=env.device)
         for _ in range(2):
             env.step(warmup_action)
 
         force_wrist_camera_usd_pose(env)
 
-        while simulation_app.is_running():
+        def reset_environment():
+            env.reset()
+
+        def step_environment():
             action = bridge.get_action().to(env.device)
             _, _, terminated, truncated, _ = env.step(action)
+            if bool(terminated.any() or truncated.any()):
+                bridge.clear_action_buffer()
+                env.reset()
+
+        while simulation_app.is_running():
+            handled = bridge.process_control_commands(
+                reset_environment, step_environment, env.cfg.decimation)
+            if not bridge.is_paused and not handled:
+                step_environment()
+            else:
+                env.sim.render()
+                time.sleep(0.01)
             bridge.publish_observations(env)
 
-            if bool(terminated.any() or truncated.any()):
-                env.reset()
     except KeyboardInterrupt:
         pass
     except Exception:
         import traceback
         traceback.print_exc()
-        raise        
+        raise
     finally:
         if bridge is not None:
             bridge.shutdown()

@@ -12,11 +12,8 @@ class G1RoughEnv3_3PlaygroundCfg(G1RoughEnv3_3Cfg_ROS2):
 
         self.scene.num_envs = 1
 
-        # Physics: 150 Hz.
-        self.sim.dt = 1.0 / 100.0
-
-        # VLA actions: 10 Hz.
-        self.decimation = 10
+        # Inherit 150 Hz physics / 15 Hz control / decimation=10 from
+        # CustomLocomotionVelocityRoughEnvCfg and the shared contract.
 
         # Playground controls reset explicitly.
         self.episode_length_s = 24.0 * 60.0 * 60.0

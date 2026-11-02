@@ -1,3 +1,4 @@
+from .contract import PHYSICS_HZ, DECIMATION, RENDER_INTERVAL
 from isaaclab_tasks.manager_based.locomotion.velocity.velocity_env_cfg import LocomotionVelocityRoughEnvCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.sensors import CameraCfg
@@ -21,27 +22,28 @@ class CustomLocomotionVelocityRoughEnvCfg(ManagerBasedRLEnvCfg):
     terminations : TerminationsCfg  = TerminationsCfg()
     curriculum: CurriculumCfg = CurriculumCfg()
     actions: ActionsCfg = ActionsCfg()
-    
+
     def __post_init__(self):
         """Post initialization."""
-        
-        
+
+
         # general settings
         # Control: 150 / 10 = 15 Hz
-        self.decimation = 10  # 10 physics steps per 1 control step
+        self.decimation = DECIMATION  # 10 physics steps per 1 control step
 
 
         self.episode_length_s = 10.0
-        self.is_finite_horizon = True
+        self.is_finite_horizon = False
+        self.terminations.time_out = None
 
         # simulation settings
         # Physics: 150 Hz
-        self.sim.dt = 1 / 150 
-        self.sim.render_interval = 1  # Render every physics step: 150 Hz
+        self.sim.dt = 1.0 / PHYSICS_HZ
+        self.sim.render_interval = RENDER_INTERVAL  # Render every physics step: 150 Hz
         self.sim.physx.bounce_threshold_velocity = 0.01
         self.sim.physx.gpu_max_rigid_patch_count = 4 * 5 * 2**15
-        
 
-        
+
+
 
 

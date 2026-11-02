@@ -55,4 +55,5 @@ tmp/
 .DS_Store
 Thumbs.db
 
-cmd
+cmd_custom_env3_3
+cmd_pi05_droid

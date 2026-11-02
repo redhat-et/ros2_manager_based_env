@@ -101,6 +101,7 @@ def main() -> None:
 
         bridge = Ros2VlaBridge(
             camera_names=["wrist_cam", "table_cam"],
+            env=env,
             state_topic="/vla/obs/state",
             action_topic="/vla/action",
             camera_topic_prefix="/vla/obs/",
@@ -124,6 +125,10 @@ def main() -> None:
                 env.reset()
     except KeyboardInterrupt:
         pass
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        raise        
     finally:
         if bridge is not None:
             bridge.shutdown()

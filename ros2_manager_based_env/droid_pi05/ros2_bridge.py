@@ -1,0 +1,135 @@
+"""ROS transport only. Isaac API calls stay on the simulator main thread."""
+from __future__ import annotations
+
+import json
+import threading
+import numpy as np
+import rclpy
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Image, CameraInfo
+from std_msgs.msg import Float32MultiArray, MultiArrayDimension, String
+from std_srvs.srv import Trigger
+
+from .contract import ChunkBuffer, decode_chunk, CAMERA_KEYS, CONTROL_HZ
+
+
+class DroidBridge:
+    def __init__(self, prefix="/droid"):
+        self.prefix = prefix.rstrip("/")
+        self._owns_context = not rclpy.ok()
+        if self._owns_context:
+            rclpy.init()
+        self.node = Node("isaaclab_droid_pi05")
+        self.buffer = ChunkBuffer()
+        self._lock = threading.Lock()
+        self._paused = False
+        self._reset = False
+        self._step = False
+        self._received_chunks = 0
+        self.images = {k: self.node.create_publisher(Image, f"{self.prefix}/obs/{k}", qos_profile_sensor_data)
+                       for k in CAMERA_KEYS}
+        self.infos = {k: self.node.create_publisher(CameraInfo, f"{self.prefix}/obs/{k}/camera_info", qos_profile_sensor_data)
+                      for k in CAMERA_KEYS}
+        self.state = self.node.create_publisher(Float32MultiArray, f"{self.prefix}/obs/state", qos_profile_sensor_data)
+        self.status = self.node.create_publisher(String, f"{self.prefix}/status", 1)
+        self.node.create_subscription(Float32MultiArray, f"{self.prefix}/action_chunk", self._on_chunk, 1)
+        self._services = [self.node.create_service(Trigger, f"{self.prefix}/{name}", self._service(name))
+                          for name in ("pause", "resume", "reset", "step", "stop")]
+        self.executor = SingleThreadedExecutor()
+        self.executor.add_node(self.node)
+        self.thread = threading.Thread(target=self.executor.spin, daemon=True)
+        self.thread.start()
+
+    def _service(self, name):
+        def callback(request, response):
+            with self._lock:
+                if name in ("pause", "stop", "reset"):
+                    self._paused = True
+                    self._step = False
+                    self.buffer.clear()
+                if name == "reset":
+                    self._reset = True
+                if name == "resume":
+                    self.buffer.clear()
+                    self._paused = False
+                if name == "step":
+                    self._step = True
+                    self._paused = True
+                response.success = True
+                response.message = f"{name} queued for the simulator main thread"
+            return response
+        return callback
+
+    def _on_chunk(self, msg):
+        try:
+            chunk = decode_chunk(msg.data, tuple(d.size for d in msg.layout.dim), msg.layout.data_offset)
+            with self._lock:
+                if not self._paused:
+                    self.buffer.replace(chunk)
+                    self._received_chunks += 1
+        except (ValueError, TypeError) as exc:
+            self.buffer.clear()
+            self.node.get_logger().error(f"Rejected chunk and cleared buffer: {exc}")
+
+    def controls(self):
+        with self._lock:
+            reset, do_step = self._reset, (not self._paused or self._step)
+            self._reset = self._step = False
+            return reset, do_step
+
+    def action(self):
+        row = self.buffer.pop()
+        if row is None:
+            return np.array([0, 0, 0, 0, 0, 0, 0, -1], dtype=np.float32), True
+        # Internal -1 sentinel cannot be supplied through ROS.
+        row[:7] = np.clip(row[:7], -1, 1)
+        row[7] = np.clip(row[7], 0, 1)
+        return row, False
+
+    def publish(self, obs, env, sim_time, idle):
+        """Use the ObservationManager result, not an alternate hidden state path."""
+        state = np.concatenate([obs["joint_position"][0].detach().cpu().numpy(),
+                                obs["gripper_position"][0].detach().cpu().numpy()]).astype(np.float32)
+        msg = Float32MultiArray()
+        msg.layout.dim = [MultiArrayDimension(label="q1..q7_rad,gripper_closure", size=8, stride=8)]
+        msg.data = state.tolist()
+        self.state.publish(msg)
+        stamp = self.node.get_clock().now().to_msg()
+        for name, publisher in self.images.items():
+            rgb = obs[name][0].detach().cpu().numpy()[..., :3]
+            if rgb.dtype != np.uint8:
+                raise ValueError(f"Expected raw uint8 camera output for {name}, got {rgb.dtype}")
+            rgb = np.ascontiguousarray(rgb)
+            image = Image()
+            image.header.stamp, image.header.frame_id = stamp, name
+            image.height, image.width = rgb.shape[:2]
+            image.encoding, image.step = "rgb8", rgb.shape[1] * 3
+            image.data = rgb.tobytes()
+            publisher.publish(image)
+            info = CameraInfo()
+            info.header = image.header
+            info.height, info.width = image.height, image.width
+            info.distortion_model = "plumb_bob"
+            info.d = [0.0] * 5
+            k = env.scene[name].data.intrinsic_matrices[0].detach().cpu().numpy()
+            info.k = k.reshape(-1).astype(float).tolist()
+            info.r = np.eye(3).reshape(-1).tolist()
+            info.p = np.column_stack([k, np.zeros(3)]).reshape(-1).astype(float).tolist()
+            self.infos[name].publish(info)
+        with self._lock:
+            paused = self._paused
+            received_chunks = self._received_chunks
+        status = String()
+        status.data = json.dumps({"sim_time": round(sim_time, 6), "control_hz": CONTROL_HZ,
+                                  "remaining": self.buffer.remaining, "idle": idle, "paused": paused,
+                                  "received_chunks": received_chunks})
+        self.status.publish(status)
+
+    def close(self):
+        self.executor.shutdown(timeout_sec=2.0)
+        self.thread.join(timeout=2.0)
+        self.node.destroy_node()
+        if self._owns_context and rclpy.ok():
+            rclpy.shutdown()

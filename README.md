@@ -211,9 +211,16 @@ cd /workspace/isaaclab
 ```
 
 Run a test training job:
-
+# custom_env_3_3 (VLA Pi05 finetuned with Lerobot checkpoint)
 ```bash
 ./isaaclab.sh -p -m ros2_manager_based_env.custom_env_3_3.run_ros2_rollout \
+  --rendering_mode performance \
+  --enable_cameras
+```
+
+# droid_pi05
+```bash
+./isaaclab.sh -p -m ros2_manager_based_env.droid_pi05.run_ros2_rollout \
   --rendering_mode performance \
   --enable_cameras
 ```

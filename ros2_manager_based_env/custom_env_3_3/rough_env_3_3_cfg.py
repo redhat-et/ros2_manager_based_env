@@ -49,7 +49,7 @@ class G1RoughEnv3_3Cfg(CustomLocomotionVelocityRoughEnvCfg):
         # Set wrist camera
         self.scene.wrist_cam = CameraCfg(
             prim_path="{ENV_REGEX_NS}/Robot/panda_hand/wrist_cam",
-            update_period=0.1,
+            update_period=0.15,
             height=256,
             width=256,
             data_types=["rgb"],
@@ -64,7 +64,7 @@ class G1RoughEnv3_3Cfg(CustomLocomotionVelocityRoughEnvCfg):
         # Set table view camera
         self.scene.table_cam = CameraCfg(
             prim_path="{ENV_REGEX_NS}/table_cam",
-            update_period=0.1,
+            update_period=0.15,
             height=256,
             width=256,
             data_types=["rgb"],

@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+import json
+
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
-from std_msgs.msg import Float32MultiArray, MultiArrayDimension
+from std_msgs.msg import Float32MultiArray, MultiArrayDimension, String
 
 from ..bridge import BaseRos2Bridge, ActionChunkBuffer
 from .contract import (
-    ACTION_DIM, MAX_CHUNK_HORIZON, INITIAL_GRIPPER_COMMAND,
+    CONTROL_HZ, ACTION_DIM, MAX_CHUNK_HORIZON, INITIAL_GRIPPER_COMMAND,
     CAMERA_KEYS, STATE_TOPIC, ACTION_TOPIC, CAMERA_TOPIC_PREFIX, NODE_NAME,
     decode_chunk, idle_action, encode_state,
 )
@@ -62,32 +64,46 @@ class Ros2VlaBridge(BaseRos2Bridge):
         )
         self._action_subscriber = self.node.create_subscription(
             Float32MultiArray, action_topic, self._on_action_chunk_msg, action_qos)
+        self._received_chunks = 0
+        self._last_action_idle = True
+        self.status = self.node.create_publisher(String, "/vla/status", 1)            
         self.start()
 
     def clear_action_buffer(self):
         with self._lock:
             self.buffer.clear()
             self._last_gripper_command = INITIAL_GRIPPER_COMMAND
+            self._last_action_idle = True
 
     def _on_action_chunk_msg(self, msg):
         try:
             chunk = decode_chunk(
-                msg.data, tuple(d.size for d in msg.layout.dim), msg.layout.data_offset)
+                msg.data,
+                tuple(d.size for d in msg.layout.dim),
+                msg.layout.data_offset,
+            )
             with self._lock:
-                # Legacy transport accepts a chunk while paused, for manual Step.
                 if len(chunk) == 0:
                     self.clear_action_buffer()
                 else:
                     self.buffer.replace(chunk)
+
+                # Count every accepted message, including an empty chunk.
+                self._received_chunks += 1
+
         except (ValueError, TypeError) as exc:
-            # Preserve legacy behavior: reject a malformed message, retain remainder.
-            self.node.get_logger().warning(f'Rejected action chunk: {exc}')
+            self.node.get_logger().warning(
+                f"Rejected action chunk: {exc}"
+            )
 
     def _next_action_row(self):
         with self._lock:
             row = self.buffer.pop()
+            self._last_action_idle = row is None
+
             if row is None:
                 return idle_action(self._last_gripper_command)
+
             self._last_gripper_command = float(row[-1])
             return row
 
@@ -96,18 +112,47 @@ class Ros2VlaBridge(BaseRos2Bridge):
         return torch.from_numpy(self._next_action_row()).unsqueeze(0)
 
     def publish_observations(self, env):
-        """Keep the existing scene-based observation path and wire order."""
+        """Publish cameras, measured state and chunk execution status."""
         stamp = self.node.get_clock().now().to_msg()
+
         for name in self._camera_names:
-            self._publish_image(name, env.scene[name].data.output['rgb'][0], stamp)
+            self._publish_image(
+                name,
+                env.scene[name].data.output["rgb"][0],
+                stamp,
+            )
 
         pose = eef_pose_axis_angle(env)[0].detach().cpu().numpy()
         fingers = gripper_pos(env)[0].detach().cpu().numpy()
         state = encode_state(pose, fingers)
+
         msg = Float32MultiArray()
-        msg.layout.dim = [MultiArrayDimension(label='state', size=len(state), stride=len(state))]
+        msg.layout.dim = [
+            MultiArrayDimension(
+                label="state",
+                size=len(state),
+                stride=len(state),
+            )
+        ]
         msg.data = state.tolist()
         self._state_publisher.publish(msg)
+
+        # Episode-local simulation time; returns to zero after env.reset().
+        sim_time = float(env.episode_length_buf[0].item()) * env.step_dt
+
+        with self._lock:
+            payload = {
+                "sim_time": round(sim_time, 6),
+                "control_hz": CONTROL_HZ,
+                "remaining": self.buffer.remaining,
+                "idle": self._last_action_idle,
+                "paused": self.is_paused,
+                "received_chunks": self._received_chunks,
+            }
+
+        status = String()
+        status.data = json.dumps(payload)
+        self.status.publish(status)
 
     def _publish_image(self, name, img_tensor, stamp):
         rgb = img_tensor.detach().cpu().numpy()

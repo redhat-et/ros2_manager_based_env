@@ -115,7 +115,10 @@ def main() -> None:
 
         def reset_environment():
             nonlocal obs, sim_time, idle
-            obs, _ = env.reset()
+
+            with torch.inference_mode():
+                obs, _ = env.reset()
+
             sim_time = 0.0
             idle = True
 

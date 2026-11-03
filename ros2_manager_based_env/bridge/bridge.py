@@ -66,7 +66,7 @@ class BaseRos2Bridge(ABC):
 
     def _get_state(self, request, response):
         response.state.state = self.simulation_state
-        return response
+        return self._result(response, None)
 
     async def _submit(self, command, value=None):
         future = Future(executor=self._executor)

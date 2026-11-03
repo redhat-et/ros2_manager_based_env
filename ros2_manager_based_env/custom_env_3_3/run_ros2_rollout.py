@@ -116,14 +116,17 @@ def main() -> None:
         force_wrist_camera_usd_pose(env)
 
         def reset_environment():
-            env.reset()
+            with torch.inference_mode():
+                env.reset()
 
         def step_environment():
-            action = bridge.get_action().to(env.device)
-            _, _, terminated, truncated, _ = env.step(action)
-            if bool(terminated.any() or truncated.any()):
-                bridge.clear_action_buffer()
-                env.reset()
+            with torch.inference_mode():
+                action = bridge.get_action().to(env.device)
+                _, _, terminated, truncated, _ = env.step(action)
+
+                if bool(terminated.any() or truncated.any()):
+                    bridge.clear_action_buffer()
+                    env.reset()
 
         while simulation_app.is_running():
             handled = bridge.process_control_commands(
